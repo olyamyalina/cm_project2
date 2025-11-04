@@ -29,7 +29,7 @@ def validate_config(config):
     repo_path = config.get('repo_path')
     if not repo_path:
         errors.append("Не указан путь или URL репозитория (repo_path).")
-    elif not (repo_path.startswith('http', 'git@') or os.path.exists(repo_path)):
+    elif not (repo_path.startswith(('http', 'git@')) or os.path.exists(repo_path)):
         errors.append(f"Некорректный путь или URL репозитория: {repo_path}")
 
     mode = config.get('mode')
@@ -40,13 +40,16 @@ def validate_config(config):
         depth = int(config.get('max_depth', 0))
         if depth <= 0:
             errors.append("max_depth должен быть положительным числом.")
-    except ValueError:
+    except (ValueError, TypeError):
         errors.append("max_depth должен быть целым числом.")
 
     return errors
 
 def main():
-    config_file = 'config.csv'
+    if len(sys.argv) > 1:
+        config_file = sys.argv[1]
+    else:
+        config_file = 'config.csv'
     config = read_config(config_file)
     errors = validate_config(config)
 
