@@ -1,5 +1,5 @@
 parameter,value
 package_name,example_package
-repo_path,https://example.com/repo.git
-mode,local
-max_depth,3
+repo_path,https://github.com/richardhozak/cargo-examples
+mode,remote
+max_depth,1
