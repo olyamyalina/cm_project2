@@ -3,8 +3,8 @@ import sys
 import os
 import re
 import urllib.request
-import urllib.error
 from urllib.parse import urlparse
+from collections import deque, defaultdict
 
 #этап 1
 def read_config(file_path):
@@ -29,7 +29,8 @@ def validate_config(config):
     errors = []
 
     if not config.get('package_name'):
-        errors.append("Не указано имя анализируемого пакета (package_name).")
+        if config.get('mode') != 'test':
+            errors.append("Не указано имя анализируемого пакета (package_name).")
 
     repo_path = config.get('repo_path')
     if not repo_path:
@@ -38,8 +39,8 @@ def validate_config(config):
         errors.append(f"Некорректный путь или URL репозитория: {repo_path}")
 
     mode = config.get('mode')
-    if mode not in ('local', 'remote'):
-        errors.append(f"Некорректный режим работы (mode): {mode}. Используйте 'local' или 'remote'.")
+    if mode not in ('local', 'remote', 'test'):
+        errors.append(f"Некорректный режим работы (mode): {mode}. Используйте 'local', 'remote' или 'test'.")
 
     try:
         depth = int(config.get('max_depth', 0))
@@ -47,6 +48,9 @@ def validate_config(config):
             errors.append("max_depth должен быть положительным числом.")
     except (ValueError, TypeError):
         errors.append("max_depth должен быть целым числом.")
+
+    if mode == 'test' and not os.path.isfile(repo_path):
+        errors.append(f"Файл тестового графа не найден: {repo_path}")
 
     return errors
 
@@ -137,6 +141,75 @@ def get_direct_dependencies(cfg):
     deps = parse_direct_deps(toml)
     return deps
 
+#Этап 3
+def parse_test_graph(path):
+    if not os.path.isfile(path):
+        raise RuntimeError(f"Файл тестового графа не найден: {path}")
+    graph = {}
+    pattern = re.compile(r'^[A-Z]$')
+    try:
+        with open(path, encoding='utf-8') as f:
+            for raw in f:
+                line = raw.split('#',1)[0].strip()
+                if not line:
+                    continue
+                if ':' in line:
+                    left, right = line.split(':',1)
+                    left = left.strip()
+                    if not pattern.match(left):
+                        raise RuntimeError(f"Неверное имя узла '{left}' в тестовом файле. Ожидается одна заглавная буква A..Z.")
+                    deps = [p.strip() for p in right.split() if p.strip()]
+                    for d in deps:
+                        if not pattern.match(d):
+                            raise RuntimeError(f"Неверное имя зависимости '{d}' у узла '{left}'. Ожидается одна заглавная буква A..Z.")
+                    graph[left] = set(deps)
+                else:
+                    node = line.strip()
+                    if not pattern.match(node):
+                        raise RuntimeError(f"Неверное имя узла '{node}' в тестовом файле. Ожидается одна заглавная буква A..Z.")
+                    graph[node] = set()
+    except Exception as e:
+        raise RuntimeError(f"Ошибка при чтении тестового графа {path}: {e}")
+    return graph
+
+def build_bfs_graph(root, get_deps, max_depth=1):
+    graph = defaultdict(set)
+    visited = set()
+    queue = deque([(root, 0)])
+    while queue:
+        node, depth = queue.popleft()
+        if node in visited:
+            continue
+        visited.add(node)
+        deps = get_deps(node)
+        graph[node].update(deps)
+        if depth < max_depth:
+            for dep in deps:
+                if dep not in visited:
+                    queue.append((dep, depth + 1))
+    return dict(graph)
+
+def print_tree(graph, root, max_depth):
+    printed = set()
+
+    def _print(node, depth, path):
+        indent = '    ' * depth
+        prefix = indent + ('└─ ' if depth > 0 else '')
+        if node in path:
+            print(f"{prefix}{node} (cycle)")
+            return
+        if node in printed:
+            print(f"{prefix}{node} (visited)")
+            return
+        print(f"{prefix}{node}")
+        printed.add(node)
+        if depth >= max_depth:
+            return
+        for child in sorted(graph.get(node, [])):
+            _print(child, depth + 1, path | {node})
+
+    _print(root, 0, set())
+
 #Main
 def main():
     #Этап 1
@@ -159,18 +232,59 @@ def main():
 
     # Этап 2
     print("\nСбор данных: извлекаем прямые зависимости.")
+    mode = config.get('mode')
     try:
-        deps = get_direct_dependencies(config)
+        if mode in ('local', 'remote'):
+            deps = get_direct_dependencies(config)
+            if not deps:
+                print("Прямые зависимости не найдены.")
+            else:
+                print("Найденные прямые зависимости (корень):")
+                for d in sorted(deps):
+                    print(f"- {d}")
+        elif mode == 'test':
+            deps = parse_test_graph(config.get('repo_path'))
+            print("Тестовый граф загружен. Узлы:")
+            for node in sorted(deps.keys()):
+                children = " ".join(sorted(deps[node])) if deps[node] else "(нет зависимостей)"
+                print(f"  {node}: {children}")
+        else:
+            print("Неизвестный режим работы.")
+            sys.exit(1)
     except Exception as e:
         print(f"Ошибка при получении зависимостей: {e}")
         sys.exit(1)
 
-    if not deps:
-        print("Прямые зависимости не найдены.")
+    # Этап 3
+    print("\nПостроение графа зависимостей (BFS).")
+    max_depth = int(config.get('max_depth', 1))
+
+    if mode == 'test':
+        def get_deps(name):
+            return deps.get(name, set())
+
+        root = config.get('package_name') or (next(iter(deps.keys())) if deps else None)
+        if not root:
+            print("Тестовый граф пуст или package_name не указан и не удалось определить корень.")
+            sys.exit(1)
+        print(f"Корневой пакет: {root}")
     else:
-        print("Найденные прямые зависимости:")
-        for d in sorted(deps):
-            print(f"- {d}")
+        root = config.get('package_name')
+
+        def get_deps(name):
+            if name == root:
+                return deps
+            return set()
+
+    graph = build_bfs_graph(root, get_deps, max_depth=max_depth)
+
+    print("\nВывод зависимостей:")
+    print_tree(graph, root, max_depth)
+
+    total_nodes = set(graph.keys())
+    for s in graph.values():
+        total_nodes.update(s)
+    print(f"\nВсего узлов в собранном графе: {len(total_nodes)}")
 
 if __name__ == "__main__":
     main()
